@@ -224,10 +224,17 @@ get_command() {
 }
 
 # Compute the permission-mode flags appended to the claude command.
-# Reads the global $auto_mode (set by --auto) and writes the resulting array
-# into the global $claude_default_flags.
+# Reads globals $ask_permissions and $auto_mode (set by --ask / --auto),
+# enforces their mutual exclusion, and writes the resulting array into the
+# global $claude_default_flags (empty array when --ask is set).
 resolve_claude_default_flags() {
-	if [[ "$auto_mode" == true ]]; then
+	if [[ "$ask_permissions" == true && "$auto_mode" == true ]]; then
+		error "--ask and --auto are mutually exclusive"
+		exit 1
+	fi
+	if [[ "$ask_permissions" == true ]]; then
+		claude_default_flags=()
+	elif [[ "$auto_mode" == true ]]; then
 		claude_default_flags=("--permission-mode" "auto")
 	else
 		claude_default_flags=("--dangerously-skip-permissions")
@@ -2625,6 +2632,7 @@ enable_git_worktree_common_dir=true
 claude_command_flag=""
 command_flag=""
 codex_mode=false
+ask_permissions=false
 auto_mode=false
 claude_default_flags=()
 
@@ -2754,6 +2762,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--safe)
 		safe_mode=true
+		shift
+		;;
+	--ask)
+		ask_permissions=true
 		shift
 		;;
 	--auto)
@@ -3032,8 +3044,10 @@ if [[ $# -gt 0 ]]; then
 		echo "  --packages, -p PKG    Install additional apt packages"
 		echo "  --backend TYPE        Force sandbox backend (auto, native, docker)"
 		echo "  --safe                Hide home dir except working dir (native only)"
+		echo "  --ask                 Don't pass --dangerously-skip-permissions to claude"
+		echo "                        (claude prompts for permissions inside the sandbox)"
 		echo "  --auto                Start claude in auto mode (--permission-mode auto)"
-		echo "                        Replaces the default --dangerously-skip-permissions"
+		echo "                        Mutually exclusive with --ask"
 		echo "  --codex-mode          Add Docker runtime flags for Codex compatibility"
 		echo "  --allow-external-git-dir"
 		echo "                        Trust and mount git common dirs outside normal layouts"
