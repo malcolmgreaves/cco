@@ -230,6 +230,16 @@ cco --safe
 cco --add-dir ~/configs:ro
 cco --allow-readonly ~/.ssh
 cco --deny-path ~/Downloads
+
+# Run claude without --dangerously-skip-permissions (claude will prompt)
+<<<<<<< Updated upstream
+cco --ask-permissions
+=======
+cco --ask
+>>>>>>> Stashed changes
+
+# Start claude in auto mode (--permission-mode auto; Opus 4.7+)
+cco --auto
 ```
 
 `cco` also honors Claude Code's local project settings file at `.claude/settings.local.json`. If that file contains an `additionalDirectories` array, those directories are mounted read/write the same way as `--add-dir PATH:rw`. `cco` parses that file with `python3` when available and falls back to `jq`; if neither tool exists it prints a warning and skips those extra mounts.
@@ -249,6 +259,13 @@ cco --deny-path ~/Downloads
 Use `--persist` or `--persist NAME` when you want `cco` to manage the session for a repo. Use `--persist-container TARGET` when you already know the exact container you want to attach to and want that choice to win over `cco`'s naming logic.
 Use `--image IMAGE` when you want `cco` to run against a custom base image, for example after `docker commit <container> my-cco-snapshot:good`. Custom image overrides are not compatible with `--rebuild` or `--packages`, because those flags only make sense for the default `cco`-managed image path.
 - `--safe` (native only, experimental): **Provides stronger filesystem isolation** by hiding your entire `$HOME` directory from Claude. Only the project directory and explicitly shared paths remain visible. **Trade-off**: Increased security but may cause some tools to fail if they need access to configuration files in `$HOME`. Use `--allow-readonly` to selectively expose needed paths.
+<<<<<<< Updated upstream
+- `--ask-permissions`: By default `cco` starts `claude` with `--dangerously-skip-permissions` because the sandbox already bounds what Claude can do. Pass `--ask-permissions` to drop that flag so Claude prompts for permissions inside the sandbox (useful when running against a less-trusted workspace or when you want to observe each decision). Mutually exclusive with `--auto`.
+- `--auto`: Starts `claude` with `--permission-mode auto`, enabling Opus 4.7's auto mode (continuous execution with Claude's own permission intelligence). Replaces the default `--dangerously-skip-permissions`. Mutually exclusive with `--ask-permissions`.
+=======
+- `--ask`: By default `cco` starts `claude` with `--dangerously-skip-permissions` because the sandbox already bounds what Claude can do. Pass `--ask` to drop that flag so Claude prompts for permissions inside the sandbox (useful when running against a less-trusted workspace or when you want to observe each decision). Mutually exclusive with `--auto`.
+- `--auto`: Starts `claude` with `--permission-mode auto`, enabling Opus 4.7's auto mode (continuous execution with Claude's own permission intelligence). Replaces the default `--dangerously-skip-permissions`. Mutually exclusive with `--ask`.
+>>>>>>> Stashed changes
 - `--allow-readonly PATH`: Share extra files or directories read-only inside the sandbox.
 - `--deny-path PATH`: Deny read/list/write access to a path so it is fully inaccessible to Claude.
 

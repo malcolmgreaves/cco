@@ -223,6 +223,33 @@ get_command() {
 	fi
 }
 
+# Compute the permission-mode flags appended to the claude command.
+<<<<<<< Updated upstream
+# Reads globals $ask_permissions and $auto_mode (set by --ask-permissions / --auto),
+# enforces their mutual exclusion, and writes the resulting array into the
+# global $claude_default_flags (empty array when --ask-permissions is set).
+resolve_claude_default_flags() {
+	if [[ "$ask_permissions" == true && "$auto_mode" == true ]]; then
+		error "--ask-permissions and --auto are mutually exclusive"
+=======
+# Reads globals $ask_permissions and $auto_mode (set by --ask / --auto),
+# enforces their mutual exclusion, and writes the resulting array into the
+# global $claude_default_flags (empty array when --ask is set).
+resolve_claude_default_flags() {
+	if [[ "$ask_permissions" == true && "$auto_mode" == true ]]; then
+		error "--ask and --auto are mutually exclusive"
+>>>>>>> Stashed changes
+		exit 1
+	fi
+	if [[ "$ask_permissions" == true ]]; then
+		claude_default_flags=()
+	elif [[ "$auto_mode" == true ]]; then
+		claude_default_flags=("--permission-mode" "auto")
+	else
+		claude_default_flags=("--dangerously-skip-permissions")
+	fi
+}
+
 # Load agent-specific behavior/policies from dedicated modules.
 if [[ -f "$CCO_INSTALLATION_DIR/lib/agents.sh" ]]; then
 	# shellcheck source=/dev/null
@@ -1576,11 +1603,11 @@ run_native_sandbox() {
 				cmd+=("${cmd_array[@]}" "${claude_args[@]}")
 			fi
 		else
-			# Running Claude - use --dangerously-skip-permissions since we're in a sandbox
+			# Running Claude - apply the configured permission flags
 			if [[ ${#claude_args[@]} -eq 0 ]]; then
-				cmd+=("${cmd_array[@]}" "--dangerously-skip-permissions")
+				cmd+=("${cmd_array[@]}" "${claude_default_flags[@]}")
 			else
-				cmd+=("${cmd_array[@]}" "--dangerously-skip-permissions" "${claude_args[@]}")
+				cmd+=("${cmd_array[@]}" "${claude_default_flags[@]}" "${claude_args[@]}")
 			fi
 		fi
 	fi
@@ -2350,7 +2377,7 @@ run_container() {
 			if [[ -n "$command_flag" || -n "$CCO_COMMAND" ]]; then
 				docker "${exec_args[@]}" "${cmd_array[@]}" "${claude_args[@]}"
 			else
-				docker "${exec_args[@]}" "${cmd_array[@]}" --dangerously-skip-permissions "${claude_args[@]}"
+				docker "${exec_args[@]}" "${cmd_array[@]}" "${claude_default_flags[@]}" "${claude_args[@]}"
 			fi
 		fi
 		local exec_status=$?
@@ -2425,11 +2452,11 @@ run_container() {
 					docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd_array[@]}" "${claude_args[@]}"
 				fi
 			else
-				# Running Claude - use --dangerously-skip-permissions
+				# Running Claude - apply the configured permission flags
 				if [[ -n "$tty_flag" ]]; then
-					docker run "$tty_flag" "${docker_args[@]}" "$IMAGE_NAME" "${cmd_array[@]}" --dangerously-skip-permissions "${claude_args[@]}"
+					docker run "$tty_flag" "${docker_args[@]}" "$IMAGE_NAME" "${cmd_array[@]}" "${claude_default_flags[@]}" "${claude_args[@]}"
 				else
-					docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd_array[@]}" --dangerously-skip-permissions "${claude_args[@]}"
+					docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd_array[@]}" "${claude_default_flags[@]}" "${claude_args[@]}"
 				fi
 			fi
 			run_status=$?
@@ -2614,6 +2641,9 @@ enable_git_worktree_common_dir=true
 claude_command_flag=""
 command_flag=""
 codex_mode=false
+ask_permissions=false
+auto_mode=false
+claude_default_flags=()
 
 if [[ "${CCO_ALLOW_EXTERNAL_GIT_DIR:-}" == "1" ]]; then
 	allow_external_git_dir=true
@@ -2743,6 +2773,18 @@ while [[ $# -gt 0 ]]; do
 		safe_mode=true
 		shift
 		;;
+<<<<<<< Updated upstream
+	--ask-permissions)
+=======
+	--ask)
+>>>>>>> Stashed changes
+		ask_permissions=true
+		shift
+		;;
+	--auto)
+		auto_mode=true
+		shift
+		;;
 	--codex-mode)
 		configure_codex_mode_paths
 		shift
@@ -2866,6 +2908,8 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+resolve_claude_default_flags
 
 persist_scope_root=$(resolve_persist_scope_root)
 persist_scope_slug=$(persist_scope_slug_for_root "$persist_scope_root")
@@ -3013,6 +3057,17 @@ if [[ $# -gt 0 ]]; then
 		echo "  --packages, -p PKG    Install additional apt packages"
 		echo "  --backend TYPE        Force sandbox backend (auto, native, docker)"
 		echo "  --safe                Hide home dir except working dir (native only)"
+<<<<<<< Updated upstream
+		echo "  --ask-permissions     Don't pass --dangerously-skip-permissions to claude"
+		echo "                        (claude prompts for permissions inside the sandbox)"
+		echo "  --auto                Start claude in auto mode (--permission-mode auto)"
+		echo "                        Mutually exclusive with --ask-permissions"
+=======
+		echo "  --ask                 Don't pass --dangerously-skip-permissions to claude"
+		echo "                        (claude prompts for permissions inside the sandbox)"
+		echo "  --auto                Start claude in auto mode (--permission-mode auto)"
+		echo "                        Mutually exclusive with --ask"
+>>>>>>> Stashed changes
 		echo "  --codex-mode          Add Docker runtime flags for Codex compatibility"
 		echo "  --allow-external-git-dir"
 		echo "                        Trust and mount git common dirs outside normal layouts"
