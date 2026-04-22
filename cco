@@ -223,6 +223,17 @@ get_command() {
 	fi
 }
 
+# Compute the permission-mode flags appended to the claude command.
+# Reads the global $auto_mode (set by --auto) and writes the resulting array
+# into the global $claude_default_flags.
+resolve_claude_default_flags() {
+	if [[ "$auto_mode" == true ]]; then
+		claude_default_flags=("--permission-mode" "auto")
+	else
+		claude_default_flags=("--dangerously-skip-permissions")
+	fi
+}
+
 # Load agent-specific behavior/policies from dedicated modules.
 if [[ -f "$CCO_INSTALLATION_DIR/lib/agents.sh" ]]; then
 	# shellcheck source=/dev/null
@@ -1576,11 +1587,11 @@ run_native_sandbox() {
 				cmd+=("${cmd_array[@]}" "${claude_args[@]}")
 			fi
 		else
-			# Running Claude - use --dangerously-skip-permissions since we're in a sandbox
+			# Running Claude - apply the configured permission flags
 			if [[ ${#claude_args[@]} -eq 0 ]]; then
-				cmd+=("${cmd_array[@]}" "--dangerously-skip-permissions")
+				cmd+=("${cmd_array[@]}" "${claude_default_flags[@]}")
 			else
-				cmd+=("${cmd_array[@]}" "--dangerously-skip-permissions" "${claude_args[@]}")
+				cmd+=("${cmd_array[@]}" "${claude_default_flags[@]}" "${claude_args[@]}")
 			fi
 		fi
 	fi
@@ -2350,7 +2361,7 @@ run_container() {
 			if [[ -n "$command_flag" || -n "$CCO_COMMAND" ]]; then
 				docker "${exec_args[@]}" "${cmd_array[@]}" "${claude_args[@]}"
 			else
-				docker "${exec_args[@]}" "${cmd_array[@]}" --dangerously-skip-permissions "${claude_args[@]}"
+				docker "${exec_args[@]}" "${cmd_array[@]}" "${claude_default_flags[@]}" "${claude_args[@]}"
 			fi
 		fi
 		local exec_status=$?
@@ -2425,11 +2436,11 @@ run_container() {
 					docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd_array[@]}" "${claude_args[@]}"
 				fi
 			else
-				# Running Claude - use --dangerously-skip-permissions
+				# Running Claude - apply the configured permission flags
 				if [[ -n "$tty_flag" ]]; then
-					docker run "$tty_flag" "${docker_args[@]}" "$IMAGE_NAME" "${cmd_array[@]}" --dangerously-skip-permissions "${claude_args[@]}"
+					docker run "$tty_flag" "${docker_args[@]}" "$IMAGE_NAME" "${cmd_array[@]}" "${claude_default_flags[@]}" "${claude_args[@]}"
 				else
-					docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd_array[@]}" --dangerously-skip-permissions "${claude_args[@]}"
+					docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd_array[@]}" "${claude_default_flags[@]}" "${claude_args[@]}"
 				fi
 			fi
 			run_status=$?
@@ -2614,6 +2625,8 @@ enable_git_worktree_common_dir=true
 claude_command_flag=""
 command_flag=""
 codex_mode=false
+auto_mode=false
+claude_default_flags=()
 
 if [[ "${CCO_ALLOW_EXTERNAL_GIT_DIR:-}" == "1" ]]; then
 	allow_external_git_dir=true
@@ -2743,6 +2756,10 @@ while [[ $# -gt 0 ]]; do
 		safe_mode=true
 		shift
 		;;
+	--auto)
+		auto_mode=true
+		shift
+		;;
 	--codex-mode)
 		configure_codex_mode_paths
 		shift
@@ -2866,6 +2883,8 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+resolve_claude_default_flags
 
 persist_scope_root=$(resolve_persist_scope_root)
 persist_scope_slug=$(persist_scope_slug_for_root "$persist_scope_root")
@@ -3013,6 +3032,8 @@ if [[ $# -gt 0 ]]; then
 		echo "  --packages, -p PKG    Install additional apt packages"
 		echo "  --backend TYPE        Force sandbox backend (auto, native, docker)"
 		echo "  --safe                Hide home dir except working dir (native only)"
+		echo "  --auto                Start claude in auto mode (--permission-mode auto)"
+		echo "                        Replaces the default --dangerously-skip-permissions"
 		echo "  --codex-mode          Add Docker runtime flags for Codex compatibility"
 		echo "  --allow-external-git-dir"
 		echo "                        Trust and mount git common dirs outside normal layouts"
