@@ -78,6 +78,57 @@ is_known_subcommand() {
 	esac
 }
 
+# Convert a human-readable size (512M, 2G, 1g, 1024, 1GiB) to bytes on stdout.
+# Returns non-zero on invalid input. macOS /bin/bash 3.2 is a 64-bit build, so
+# $(( )) uses 64-bit arithmetic and multi-GiB values are safe.
+parse_size_to_bytes() {
+	local input="$1" num unit mult=1
+	[[ "$input" =~ ^([0-9]+)([kKmMgG]?)[iI]?[bB]?$ ]] || return 1
+	num="${BASH_REMATCH[1]}"
+	unit="${BASH_REMATCH[2]}"
+	case "$unit" in
+	k | K) mult=1024 ;;
+	m | M) mult=$((1024 * 1024)) ;;
+	g | G) mult=$((1024 * 1024 * 1024)) ;;
+	esac
+	printf '%s' "$((num * mult))"
+}
+
+# True if $1 parses to a positive byte count. Used to disambiguate an optional
+# --ramdisk size argument from a following subcommand (e.g. `--ramdisk shell`).
+is_valid_ramdisk_size() {
+	local bytes
+	bytes=$(parse_size_to_bytes "$1") || return 1
+	[[ "$bytes" -gt 0 ]]
+}
+
+# Resolve the configured --ramdisk size into RAMDISK_BYTES (validated + clamped).
+# Returns non-zero on invalid input so callers can `|| exit 1`. Note: we set a
+# global rather than echo, because `$(...)` runs in a subshell where `exit`/error
+# would not terminate the parent.
+resolve_ramdisk_bytes() {
+	local size="${ramdisk_size:-${CCO_RAMDISK_DEFAULT_SIZE:-512M}}" bytes
+	bytes=$(parse_size_to_bytes "$size") || {
+		error "Invalid --ramdisk size: '$size'"
+		return 1
+	}
+	if [[ "$bytes" -le 0 ]]; then
+		error "--ramdisk size must be greater than zero (got: '$size')"
+		return 1
+	fi
+	if [[ "$bytes" -gt 68719476736 ]]; then
+		error "--ramdisk size exceeds the 64 GiB sanity cap (got: '$size')"
+		return 1
+	fi
+	if [[ "$bytes" -lt 1048576 ]]; then
+		warn "--ramdisk size below 1 MiB; clamping to 1 MiB"
+		bytes=1048576
+	elif [[ "$bytes" -gt 4294967296 ]]; then
+		warn "--ramdisk larger than 4 GiB will consume host memory while in use"
+	fi
+	RAMDISK_BYTES="$bytes"
+}
+
 using_custom_docker_image() {
 	[[ -n "$docker_image_override" ]]
 }
@@ -2015,6 +2066,23 @@ run_native_sandbox() {
 	fi
 	cmd+=("${sandbox_rules[@]}")
 
+	# Provision an ephemeral RAM disk if requested. cco picks the size and the
+	# mountpoint and forwards them to the sandbox helper, which owns the
+	# OS-specific create/mount and (on macOS) the detach-on-exit. CCO_RAMDISK is
+	# exported here so it is inherited through the exec into the sandboxed process.
+	if [[ "$ramdisk_enabled" == true ]]; then
+		resolve_ramdisk_bytes || exit 1
+		local ramdisk_mount
+		if [[ "$(uname -s)" == "Darwin" ]]; then
+			ramdisk_mount="/Volumes/cco-ramdisk-$$-${RANDOM}"
+		else
+			ramdisk_mount="/tmp/cco-ramdisk"
+		fi
+		cmd+=("--ramdisk" "$RAMDISK_BYTES" "$ramdisk_mount")
+		export CCO_RAMDISK="$ramdisk_mount"
+		log "RAM disk enabled: $ramdisk_mount (${RAMDISK_BYTES} bytes)"
+	fi
+
 	# Add separator and any extra backend args (from -- or CCO_SANDBOX_ARGS_FILE)
 	# Format: sandbox [opts] -- [backend-args...] -- <command>
 	# The sandbox script collects everything between the two -- markers as backend args
@@ -2422,6 +2490,19 @@ run_container() {
 	# Enable Claude Code background tasks when requested (can be enabled with --enable-background-tasks)
 	if [[ "$enable_background_tasks" = true ]]; then
 		docker_args+=(-e "ENABLE_BACKGROUND_TASKS=1")
+	fi
+
+	# Provision an ephemeral RAM disk (tmpfs) if requested. No extra capabilities
+	# are needed and the mount is torn down with the container.
+	if [[ "$ramdisk_enabled" == true ]]; then
+		resolve_ramdisk_bytes || exit 1
+		local ramdisk_mount="/tmp/cco-ramdisk"
+		docker_args+=(--mount "type=tmpfs,destination=$ramdisk_mount,tmpfs-size=$RAMDISK_BYTES")
+		docker_args+=(-e "CCO_RAMDISK=$ramdisk_mount")
+		log "RAM disk enabled (tmpfs): $ramdisk_mount (${RAMDISK_BYTES} bytes)"
+		if [[ "$persist_mode" == true || -n "$persist_container_target" ]]; then
+			warn "--ramdisk only takes effect when the persistent container is first created"
+		fi
 	fi
 
 	# Enable Docker access if requested
@@ -3076,6 +3157,9 @@ claude_command_flag=""
 command_flag=""
 codex_mode=false
 auto_mode=false
+ramdisk_enabled=false
+ramdisk_size=""
+CCO_RAMDISK_DEFAULT_SIZE="${CCO_RAMDISK_DEFAULT_SIZE:-512M}"
 
 if [[ "${CCO_ALLOW_EXTERNAL_GIT_DIR:-}" == "1" ]]; then
 	allow_external_git_dir=true
@@ -3103,7 +3187,7 @@ for arg in "$@"; do
 	if [[ "$arg" == "--" ]]; then
 		found_separator=true
 		normalized_args+=("$arg")
-	elif [[ "$found_separator" == false && "$arg" == --persist=* ]]; then
+	elif [[ "$found_separator" == false && ("$arg" == --persist=* || "$arg" == --ramdisk=*) ]]; then
 		normalized_args+=("$arg")
 	elif [[ "$found_separator" == false && "$arg" == --*=* ]]; then
 		normalized_args+=("${arg%%=*}" "${arg#*=}")
@@ -3207,6 +3291,25 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--safe)
 		safe_mode=true
+		shift
+		;;
+	--ramdisk)
+		ramdisk_enabled=true
+		# Optional size: only consume $2 if it looks like a size, never a subcommand.
+		if [[ $# -gt 1 ]] && [[ "$2" != -* ]] && ! is_known_subcommand "$2" && is_valid_ramdisk_size "$2"; then
+			ramdisk_size="$2"
+			shift 2
+		else
+			shift
+		fi
+		;;
+	--ramdisk=*)
+		ramdisk_enabled=true
+		ramdisk_size="${1#*=}"
+		if [[ -z "$ramdisk_size" ]] || ! is_valid_ramdisk_size "$ramdisk_size"; then
+			error "--ramdisk size must be like 512M, 2G, or a raw byte count (got: '${ramdisk_size}')"
+			exit 1
+		fi
 		shift
 		;;
 	--codex-mode)
@@ -3422,6 +3525,15 @@ if [[ $# -gt 0 ]]; then
 			rm -rf "$(persist_state_root)"
 			log "Removed persistent container state"
 		fi
+		# Reap macOS RAM disks orphaned by a hard kill (SIGKILL skips the helper's
+		# detach trap). Matched by cco's own cco-ramdisk- name prefix only.
+		if [[ "$(uname -s)" == "Darwin" ]]; then
+			for vol in /Volumes/cco-ramdisk-*; do
+				[[ -d "$vol" ]] || continue
+				log "Detaching orphaned RAM disk: $vol"
+				hdiutil detach "$vol" -force >/dev/null 2>&1 || true
+			done
+		fi
 		exit 0
 		;;
 	info)
@@ -3501,6 +3613,8 @@ if [[ $# -gt 0 ]]; then
 		echo "  --packages, -p PKG    Install additional apt packages"
 		echo "  --backend TYPE        Force sandbox backend (auto, native, docker)"
 		echo "  --safe                Hide home dir except working dir (native only)"
+		echo "  --ramdisk[=SIZE]      Provision an ephemeral RAM disk; path exported as \$CCO_RAMDISK"
+		echo "                        SIZE like 512M (default), 2G, or raw bytes. Also: --ramdisk SIZE"
 		echo "  --codex-mode          Add Docker runtime flags for Codex compatibility"
 		echo "  --allow-external-git-dir"
 		echo "                        Trust and mount git common dirs outside normal layouts"
@@ -3538,6 +3652,8 @@ if [[ $# -gt 0 ]]; then
 		echo "  CCO_ALLOW_EXTERNAL_GIT_DIR=1"
 		echo "                        Trust external git common dirs for worktree support"
 		echo "  CCO_SANDBOX_ARGS_FILE Persistent sandbox args file (one arg per line)"
+		echo "  CCO_RAMDISK           Path to the --ramdisk mount (set inside the sandbox)"
+		echo "  CCO_RAMDISK_DEFAULT_SIZE  Default --ramdisk size when none is given (512M)"
 		echo "  ANTHROPIC_API_KEY     Passed through automatically"
 		echo "  ANTHROPIC_AUTH_TOKEN  Passed through automatically"
 		echo "  CLAUDE_CODE_OAUTH_TOKEN  Passed through (skips credential file check)"

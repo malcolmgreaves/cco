@@ -7,8 +7,9 @@
 set -euo pipefail
 
 usage() {
-	echo "Usage: sandbox [--safe] [--allow-keychain] [-w|--write PATH] [--read-only PATH] [--deny PATH]... [-- [BACKEND_ARGS...] --] <command> [args...]"
+	echo "Usage: sandbox [--safe] [--allow-keychain] [--ramdisk BYTES PATH] [-w|--write PATH] [--read-only PATH] [--deny PATH]... [-- [BACKEND_ARGS...] --] <command> [args...]"
 	echo "  PATH may be a directory (RW under it) or a file (RW to that file only)."
+	echo "  --ramdisk BYTES PATH: Provision an ephemeral RAM disk of BYTES bytes, mounted at PATH (provisioned by cco)."
 	echo "  --allow-keychain: Allow access to macOS Keychain (DANGEROUS - grants read/write access to ALL Keychain entries)"
 	echo "  BACKEND_ARGS: Extra arguments passed directly to bwrap (Linux) or sandbox-exec (macOS)"
 	echo "                Must be enclosed between -- markers if provided"
@@ -56,11 +57,23 @@ deny_paths=()
 backend_extra_args=()
 safe_mode=false
 allow_keychain=false
+ramdisk_enabled=false
+ramdisk_bytes=""
+ramdisk_path=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--safe)
 		safe_mode=true
 		shift
+		;;
+	--ramdisk)
+		shift
+		[[ $# -ge 2 ]] || usage
+		ramdisk_bytes="$1"
+		shift
+		ramdisk_path="$1"
+		shift
+		ramdisk_enabled=true
 		;;
 	-w | --write)
 		shift
@@ -431,6 +444,17 @@ run_linux() {
 			fi
 		fi
 	done
+	# Ephemeral RAM disk (tmpfs) inside the mount namespace; auto-removed when
+	# bwrap exits. No capabilities needed. Sits after the base --tmpfs /tmp.
+	if [[ "$ramdisk_enabled" == true ]]; then
+		if bwrap --help 2>&1 | grep -q -- '--size'; then
+			args+=(--size "$ramdisk_bytes" --tmpfs "$ramdisk_path")
+		else
+			echo "sandbox: WARNING: bubblewrap lacks --size; RAM disk will not be size-limited" >&2
+			args+=(--tmpfs "$ramdisk_path")
+		fi
+	fi
+
 	args+=(--chdir "$PWD_ABS")
 
 	# Add any extra backend args
@@ -463,6 +487,36 @@ run_macos() {
 		echo "sandbox: sandbox-exec not found on this macOS." >&2
 		exit 127
 	}
+
+	# Provision an ephemeral RAM disk if requested. We record the device id and
+	# detach ONLY that device on exit (EXIT/INT/TERM), never by name or path, so we
+	# can never tear down a volume we did not create. ramdisk_dev is intentionally
+	# not 'local' so the EXIT trap still sees it as this function unwinds.
+	ramdisk_dev=""
+	# shellcheck disable=SC2329  # invoked indirectly via the trap below
+	cleanup_ramdisk() {
+		[[ -n "$ramdisk_dev" ]] || return 0
+		hdiutil detach "$ramdisk_dev" >/dev/null 2>&1 ||
+			hdiutil detach "$ramdisk_dev" -force >/dev/null 2>&1 || true
+		ramdisk_dev=""
+	}
+	if [[ "$ramdisk_enabled" == true ]]; then
+		trap cleanup_ramdisk EXIT INT TERM
+		local sectors=$(((ramdisk_bytes + 511) / 512))
+		ramdisk_dev="$(hdiutil attach -nomount "ram://$sectors" 2>/dev/null | tr -d '[:space:]')" || ramdisk_dev=""
+		if [[ -z "$ramdisk_dev" ]]; then
+			echo "sandbox: failed to create RAM disk" >&2
+			exit 1
+		fi
+		if ! diskutil erasevolume HFS+ "$(basename "$ramdisk_path")" "$ramdisk_dev" >/dev/null 2>&1; then
+			echo "sandbox: failed to format RAM disk on $ramdisk_dev" >&2
+			exit 1
+		fi
+		if [[ ! -d "$ramdisk_path" ]]; then
+			echo "sandbox: RAM disk did not mount at $ramdisk_path" >&2
+			exit 1
+		fi
+	fi
 
 	# Ensure any whitelisted *files* exist so Seatbelt can actually write to them
 	for ap in "${write_paths[@]+"${write_paths[@]}"}"; do
@@ -611,6 +665,12 @@ run_macos() {
 		echo "(allow file-write* (subpath \"/var/folders\"))"
 		echo "(allow file-write* (subpath \"/private/var/folders\"))"
 		echo "(allow file-write* (subpath \"/private/tmp\"))"
+
+		# RAM disk mountpoint (provisioned by cco; lives under /Volumes, which is
+		# outside the hardcoded temp dirs above, so it needs an explicit allow).
+		if [[ "$ramdisk_enabled" == true ]]; then
+			printf '(allow file-write* (subpath "%s"))\n' "$(policy_quote "$ramdisk_path")"
+		fi
 
 		# 4. Common device files and pipes
 		echo "(allow file-write* (literal \"/dev/null\"))"

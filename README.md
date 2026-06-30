@@ -229,6 +229,10 @@ cco cleanup
 # Safe mode (native sandbox): hide $HOME for stronger isolation (experimental)
 cco --safe
 
+# Provision an ephemeral RAM disk for fast scratch space (reachable as $CCO_RAMDISK)
+cco --ramdisk            # default size (512M)
+cco --ramdisk=2G         # custom size; also accepts `cco --ramdisk 2G`
+
 # Share directories read-only or hide them
 cco --add-dir ~/configs:ro
 cco --allow-readonly ~/.ssh
@@ -255,6 +259,22 @@ Use `--image IMAGE` when you want `cco` to run against a custom base image, for 
 - `--safe` (native only, experimental): **Provides stronger filesystem isolation** by hiding your entire `$HOME` directory from Claude. Only the project directory and explicitly shared paths remain visible. **Trade-off**: Increased security but may cause some tools to fail if they need access to configuration files in `$HOME`. Use `--allow-readonly` to selectively expose needed paths.
 - `--allow-readonly PATH`: Share extra files or directories read-only inside the sandbox.
 - `--deny-path PATH`: Deny read/list/write access to a path so it is fully inaccessible to Claude.
+- `--ramdisk[=SIZE]` (opt-in): cco provisions an ephemeral RAM disk before the sandbox starts and exposes it inside as `$CCO_RAMDISK`. `SIZE` accepts `512M` (default), `2G`, or a raw byte count; override the default with `CCO_RAMDISK_DEFAULT_SIZE`. See below for details.
+
+### Ephemeral scratch space (`--ramdisk`)
+
+`--ramdisk` gives processes inside the sandbox a fast, ephemeral RAM-backed scratch directory. **cco owns the whole lifecycle** — it creates the RAM disk before launching the sandbox and tears down only the device it created when the run ends; the agent never runs `mount`/`unmount` and never gets raw device (`/dev/disk*`) or `CAP_SYS_ADMIN` access. This is deliberate: a kernel-level sandbox profile cannot tell a RAM disk from a real disk, so granting the agent the access RAM-disk tools need would also expose your real disks. Letting cco own the lifecycle is what makes "only ever tear down what it created" enforceable.
+
+```bash
+cco --ramdisk shell 'echo "$CCO_RAMDISK"; cp big-input "$CCO_RAMDISK/"'
+cco --ramdisk=4G "build everything under $CCO_RAMDISK for speed"
+```
+
+- **Use `$CCO_RAMDISK`, not a hardcoded path** — the literal mount path differs per backend (macOS: `/Volumes/cco-ramdisk-*`; Linux native / Docker: `/tmp/cco-ramdisk`).
+- **Per backend**: macOS native uses an unprivileged `hdiutil` RAM disk detached on exit; Linux native uses a bubblewrap `tmpfs` (namespaced, auto-removed); Docker uses a `tmpfs` mount torn down with the container. No backend needs elevated privileges.
+- **Contents are ephemeral** — the RAM disk is destroyed when the run exits. On macOS its memory is consumed as you write into it and released on detach; keep sizes modest (sizes above 4&nbsp;GiB warn, above 64&nbsp;GiB are rejected).
+- **Persistent Docker containers**: `--ramdisk` takes effect only when the container is first created; it is fixed for that container's lifetime.
+- **Hard kills**: if a run is `SIGKILL`ed before cleanup, `cco cleanup` reaps any orphaned `cco-ramdisk-*` volumes on macOS.
 
 ### Allow paths inside deny paths
 
